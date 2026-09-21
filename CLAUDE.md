@@ -179,9 +179,90 @@ headroom that the top data label isn't clipped. Every trace also sets
 **`cliponaxis=False`**, which is the actual fix for labels being cut off at the plot
 edge; the range widening alone would not guarantee it.
 
-Layout note: `.block-container` top padding is overridden to 2.2rem (1.2rem in the
-sidebar) via injected CSS right after `set_page_config`, because Streamlit's default
-~6rem gap made the page open on empty space.
+Layout note: top padding is trimmed via injected CSS right after `set_page_config`,
+because Streamlit's default ~6rem gap made the page open on empty space. Three
+selectors matter, all verified present in the installed Streamlit build first:
+`stMainBlockContainer` (main column), `stSidebarHeader` (a separate div reserving room
+for the collapse arrow — the one that's easy to miss), and the sidebar's `h2`, which
+carries its own top padding. Sidebar subheaders are `h3` and keep their spacing.
+
+### Visual theme (matched to ornn.com)
+
+`.streamlit/config.toml` sets the theme; the palette is lifted from the design tokens
+published in ornn.com's markup.
+
+**`config.toml` deliberately holds ONE `[theme]` table — do not add `[theme.light]` /
+`[theme.dark]` sub-tables.** When both are defined Streamlit treats the app as
+supporting either and picks from the browser/OS preference, which silently overrode
+`base = "dark"` and opened the app in light mode. With a single table the custom theme
+always wins and the app opens dark.
+
+Light mode is instead an **in-app toggle** (`key="dark_mode"`, defaults on), sitting in
+a narrow right-hand column beside the title. (A `position: fixed` variant that floated
+it into Streamlit's toolbar beside Deploy was tried and reverted — Streamlit has no API
+for adding widgets to its toolbar, and the fixed-offset hack is fragile.) The theme block at the top of `app.py` reads that session-state key,
+rewrites the `theme.*` config options via `config.set_option` and calls `st.rerun()` —
+necessary because the theme is serialised into the `NewSession` message at the *start*
+of a run, so a change only takes effect on the next one. `_theme_applied` is seeded to
+`"dark"` so first load doesn't rerun, and guards against a rerun loop. Caveat: this
+mutates **process-global** config, so in a multi-user deployment one viewer's toggle
+would move everyone's theme. Fine for a local demo; would need rethinking if hosted.
+
+| | dark | light |
+|---|---|---|
+| accent (`primaryColor`) | `#AD8147` | `#9A6F35` |
+| page | `#141414` | `#F3F3F3` |
+| surfaces | `#212121` | `#E8E8E8` |
+| text | `#F3F3F3` | `#141414` |
+| borders | `#3D4045` | `#C2C2C2` |
+
+ornn.com itself sits on pure `#000000`, but across a full dashboard that reads as harsh,
+so dark mode uses `#141414`. The config comments carry darker and lighter alternatives.
+
+`baseRadius = "none"` squares the corners, matching the site (its CSS declares
+`border-radius: 0` and carries no numeric radii). A short CSS block squares the few
+widgets that carry their own radius — BaseWeb selects, popovers, expanders, metrics,
+alerts, plotly containers, buttons and inputs.
+
+**Chart palette lives in `app.py`, not the config** — Streamlit's theme doesn't reach
+inside plotly. `palette(mode)` is the single source of truth for both modes: it feeds
+the `pio.templates["ornn"]` template, the injected CSS, and the `config.set_option`
+calls that restyle Streamlit's own chrome. Add a colour there, not in three places.
+
+Semantic rule to preserve: **`ACCENT` (bronze) carries the hedge and any single-series
+chart; `NEUTRAL` carries the unhedged baseline.** Bronze always marks the signal.
+`MUTED` is for reference lines and secondary labels.
+
+**Don't set the light-mode neutral to `#6F7681`.** It's the obvious pick from the
+palette, but its luminance is almost identical to the bronze — contrast ratio 1.03, so
+the two chart series become near-indistinguishable. Light mode uses `#3D4045` instead
+(2.33 against the accent, 9.38 against the page). Measured ratios against their own
+page: dark accent 5.27, neutral 9.22, muted 4.02; light accent 4.03, neutral 9.38,
+muted 4.13. Gridlines are decorative and intentionally below 3:1.
+
+The **GPU picker** drives every number on the page, so its control carries a bronze
+outline the other inputs don't have. Two traps here, both hit during development:
+
+- **Use a keyed `st.container`, not a key on the widget.** `st.container(key="gpu_box")`
+  reliably emits `.st-key-gpu_box`; the same key on the selectbox itself did not give a
+  selector that matched.
+- **Draw the outline as `box-shadow: inset 0 0 0 1px`, not `border`.** BaseWeb's inner
+  control only paints its border on focus, so a `border` rule made the outline appear
+  *only while the dropdown was open* — and what looked like it half-working was actually
+  Streamlit's focus ring, which is bronze because `primaryColor` is bronze. A box-shadow
+  paints unconditionally and needs no guess about which child owns the border.
+
+`st.metric` draws a **trend arrow** beside any delta. Every delta on this page is a
+description ("95% CI: 60–64%", "Monte Carlo paths"), not a movement, so
+`stMetricDeltaIcon-Up` / `-Down` are hidden — with `padding-left` on `stMetricDelta` to
+replace the indent the icon used to provide, otherwise the text sits flush against the
+tile's left edge.
+
+Note the CSS block is an f-string: every literal CSS brace must be doubled.
+
+Fonts are left alone. ornn.com uses Geist Mono / Fragment Mono throughout, so switching
+the app to a monospace stack (via `theme.font` or `theme.fontFaces`) would move it
+closer still.
 
 `cached_ci_sims` runs at `(lo, slider_vol, hi)`, so the whisker always brackets the
 p95 the rest of the page shows even if the volatility slider is overridden. Only

@@ -1,0 +1,28 @@
+# Theme matched to ornn.com.
+#
+# Palette lifted from the design tokens published in that site's markup:
+#   #ad8147  bronze accent
+#   #141414  page        #212121  surfaces
+#   #f3f3f3  text        #3d4045  borders
+# The site declares border-radius: 0 throughout and carries no numeric radii,
+# hence baseRadius = "none".
+#
+# ornn.com itself sits on pure #000000, but across a full dashboard that reads
+# as harsh, so the page uses their #141414. To go darker, drop the pair to
+# #0A0A0B / #141414; to go lighter, #1C1C1C / #2B2B2B.
+#
+# ONE [theme] table on purpose — no [theme.light] / [theme.dark] sub-tables.
+# When both are defined Streamlit treats the app as supporting either and picks
+# from the browser/OS preference, which is why an earlier version opened in
+# light mode despite base = "dark". With a single table this theme always wins,
+# so the app opens dark. The in-app toggle in app.py swaps these values at
+# runtime for light mode.
+
+[theme]
+base = "dark"
+primaryColor = "#AD8147"
+backgroundColor = "#141414"
+secondaryBackgroundColor = "#212121"
+textColor = "#F3F3F3"
+borderColor = "#3D4045"
+baseRadius = "none"
