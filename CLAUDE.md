@@ -23,7 +23,7 @@ sub-indices commercially important — an argument to raise in the interview.
 |---|---|
 | `ocpi_pull.py` | Pulls OCPI daily history from Ornn's free public API into `data/ocpi_history.csv`; merges incrementally, saves raw JSON, runs data-quality checks, prints summary stats |
 | `hedge_sim.py` | Calibrates from the CSV, runs the Monte Carlo hedging simulation, prints results, saves `hedge_results.png` |
-| `app.py` | Streamlit dashboard over the same engine. Its **"Refresh OCPI data from Ornn"** button mirrors `ocpi_pull.py`'s `main()` — same incremental merge, same raw JSON snapshot to `data/raw/`, same `validate()` checks, with warnings surfaced via `st.sidebar.warning`. Keep it that way: it writes to the tracked CSV, so it must not be a shortcut around the audit trail or the data-quality checks. Top: scenario line + four headline metrics (simulated variance removed with its 95% CI, theoretical ρ², hedge ratio, Monte Carlo sample size). Charts are cost histogram / simulated path fan chart on the first row, **bad-case interval chart** / variance-removed-vs-rho curve on the second. **Backtest on realized OCPI history sits last** (three metrics + cumulative-cost and OCPI-vs-locked charts). Six charts total. Default GPU is **B200** |
+| `app.py` | Streamlit dashboard over the same engine. Its **"Refresh OCPI data from Ornn"** button mirrors `ocpi_pull.py`'s `main()` — same incremental merge, same raw JSON snapshot to `data/raw/`, same `validate()` checks, with warnings surfaced via `st.sidebar.warning`. Keep it that way: it writes to the tracked CSV, so it must not be a shortcut around the audit trail or the data-quality checks. Top: scenario line + four headline metrics (simulated variance removed with its 95% CI, theoretical ρ², hedge ratio, Monte Carlo sample size). Charts are cost histogram / simulated path fan chart on the first row, **bad-case interval chart** / variance-removed-vs-rho curve on the second. An **"About this dashboard"** expander at the foot carries the standing write-up: what the demo is, the data source, how the model works, its four stated limitations (short history, rho is an assumption not a measurement, no forward curve, point settlement) and next steps. Its simulation count is interpolated from the `n_sims` slider, not hardcoded — keep it that way. **Backtest on realized OCPI history sits last** (three metrics + cumulative-cost and OCPI-vs-locked charts). Six charts total. Default GPU is **H100 SXM** |
 | `ocpi_daily.yml` | GitHub Actions workflow (not yet installed) to run the pull every weekday and commit the CSV |
 
 Run commands (Windows PowerShell, Python 3.14):
@@ -205,10 +205,15 @@ supporting either and picks from the browser/OS preference, which silently overr
 `base = "dark"` and opened the app in light mode. With a single table the custom theme
 always wins and the app opens dark.
 
-Light mode is instead an **in-app toggle** (`key="dark_mode"`, defaults on), sitting in
-a narrow right-hand column beside the title. (A `position: fixed` variant that floated
-it into Streamlit's toolbar beside Deploy was tried and reverted — Streamlit has no API
-for adding widgets to its toolbar, and the fixed-offset hack is fragile.) The theme block at the top of `app.py` reads that session-state key,
+Light mode is instead an **in-app `st.toggle`** (`key="dark_mode"`) in a narrow
+right-hand column beside the title. Its **label is dynamic** — it names the mode the
+switch takes you *to* ("Light mode" while in dark, "Dark mode" while in light) — while
+the switch position still tracks dark on/off, which is the state the theme block reads.
+A button variant was tried and reverted; the toggle is the wanted affordance.
+(A `position: fixed` variant that floated the control into Streamlit's toolbar beside
+Deploy was also tried and reverted — Streamlit has no API for adding widgets to its
+toolbar, and the fixed-offset hack is fragile.)
+The theme block at the top of `app.py` reads that session-state key,
 rewrites the `theme.*` config options via `config.set_option` and calls `st.rerun()` —
 necessary because the theme is serialised into the `NewSession` message at the *start*
 of a run, so a change only takes effect on the next one. `_theme_applied` is seeded to
@@ -287,9 +292,22 @@ Fonts are left alone. ornn.com uses Geist Mono / Fragment Mono throughout, so sw
 the app to a monospace stack (via `theme.font` or `theme.fontFaces`) would move it
 closer still.
 
-`cached_ci_sims` runs at `(lo, slider_vol, hi)`, so the whisker always brackets the
-p95 the rest of the page shows even if the volatility slider is overridden. Only
-"Budget variance removed" keeps a CI caption up top.
+**`cached_ci_sims` runs at `(lo, point_estimate, hi)` — never the volatility slider.**
+An earlier version passed the slider value as the middle run, so dragging volatility
+past a CI bound stretched the span to include it while the label still read "95% CI".
+The interval is a claim about the data and must not move when a slider does.
+
+That decoupling means the diamond (which tracks the slider, so it matches the histogram
+and the headline metrics) can now legitimately fall **outside** its whisker. The chart
+supports this because the interval is drawn as **its own line segment**, not as
+`error_x` on the marker — error bars are offsets from the marker and cannot render a
+marker outside them. When the slider sits beyond the CI the diamond visibly detaches,
+the x-range expands to keep it in frame, and the caption says why. Verified at 5%, 33%,
+40%, 66% and 120% volatility: whiskers pinned at $16.00M–$21.19M throughout, diamond
+detaching and being flagged in both directions.
+
+Only "Simulated budget variance removed" keeps a CI caption up top, and it likewise no
+longer moves with the slider.
 
 Relief and whisker width by GPU (500 GPUs, rho 0.8, 93 days):
 

@@ -131,6 +131,14 @@ st.markdown(
       /* Sidebar reads as a distinct panel against the page. */
       [data-testid="stSidebar"] {{ border-right: 1px solid {BORDER}; }}
 
+      /* Bronze border on the two expanders. Recolour the border Streamlit
+         already draws on the inner <details> rather than adding one to the
+         outer div: doing both stacked two 1px lines and read as a 2px border,
+         heavier than the GPU dropdown beside it. */
+      [data-testid="stExpander"] > details {{
+          border-color: {ACCENT} !important;
+      }}
+
       /* --- GPU picker -------------------------------------------------------
          It drives every number on the page, so the control gets a bronze border.
          Scoped to the sidebar's selectbox because there is exactly one; add a
@@ -387,7 +395,7 @@ if not CSV_PATH.exists():
 history = load_history(str(CSV_PATH))
 gpus = sorted(history["gpu"].unique())
 gpu = st.sidebar.selectbox("GPU", gpus,
-                           index=gpus.index("B200") if "B200" in gpus else 0)
+                           index=gpus.index("H100 SXM") if "H100 SXM" in gpus else 0)
 cal = cached_calibration(str(CSV_PATH), gpu)
 
 n_gpus = st.sidebar.slider("Number of GPUs", 50, 5000, 500, step=50)
@@ -439,9 +447,11 @@ budget = gpu_hours * cal["start_price"]
 # ----------------------------------------------------------------------------
 _title_col, _toggle_col = st.columns([7, 1], vertical_alignment="center")
 with _toggle_col:
-    # Reads back into st.session_state["dark_mode"], which the theme block at the
-    # top of the script picks up on the next run.
-    st.toggle("Dark mode", value=True, key="dark_mode")
+    # The label names the mode the switch takes you TO, so it flips with the
+    # theme. The switch itself still tracks dark on/off — that's the state
+    # st.session_state["dark_mode"] holds and the theme block at the top reads.
+    st.toggle("Light mode" if THEME == "dark" else "Dark mode",
+              value=True, key="dark_mode")
 with _title_col:
     st.title("Hedge GPU compute costs with the OCPI")
 st.write(
@@ -459,7 +469,12 @@ have_ci = bool(np.isfinite(vci["lo"]))
 if have_ci:
     # Run at the CI bounds plus the live slider volatility, so the interval always
     # brackets the numbers actually shown elsewhere on the page.
-    ci_runs = cached_ci_sims(cal["start_price"], (vci["lo"], vol, vci["hi"]), rho,
+    # Run at the CI bounds and the CALIBRATED POINT ESTIMATE — never the volatility
+    # slider. Including the slider let a value dragged outside the interval widen
+    # the span, which was then still labelled "95% CI". The interval is a statement
+    # about the data, so it must not move when the slider does.
+    ci_runs = cached_ci_sims(cal["start_price"],
+                             (vci["lo"], vci["point"], vci["hi"]), rho,
                              n_gpus, months, n_sims, drift, buyer_vol_mult,
                              hedge_mode, hedge_ratio)
     span = lambda key: (min(r[key] for r in ci_runs), max(r[key] for r in ci_runs))
@@ -543,36 +558,45 @@ with left:
     st.subheader("Bad case: 95th-percentile cost")
     u_mid, h_mid = float(np.percentile(u, 95)), float(np.percentile(h, 95))
     fig = go.Figure()
-    # One marker per case at the 95th percentile, with a whisker spanning the range
-    # the volatility CI implies. Asymmetric error bars: the interval is not centred.
+    # The whisker is drawn as its OWN line segment rather than as error bars on
+    # the diamond. Error bars are offsets from the marker, so they can never show
+    # a diamond lying outside the interval — but that is exactly what should
+    # happen when the volatility slider is set beyond the CI, and seeing the
+    # diamond detach is the clearest signal that it has been.
     rows = [("Unhedged", u_mid, u_lo if have_ci else u_mid, u_hi if have_ci else u_mid, NEUTRAL),
             ("Hedged", h_mid, h_lo if have_ci else h_mid, h_hi if have_ci else h_mid, ACCENT)]
     for label, mid, lo_, hi_, colour in rows:
+        if have_ci:
+            fig.add_trace(go.Scatter(
+                x=[lo_ / 1e6, hi_ / 1e6], y=[label, label], mode="lines+markers",
+                line=dict(color=colour, width=3),
+                marker=dict(symbol="line-ns", size=12,
+                            line=dict(color=colour, width=3)),
+                cliponaxis=False, showlegend=False,
+                hovertemplate=(f"<b>{label}</b> 95% CI<br>"
+                               f"{money(lo_)} – {money(hi_)}<extra></extra>")))
+            # End labels, placed OUTWARD so they clear the bar.
+            fig.add_trace(go.Scatter(
+                x=[lo_ / 1e6, hi_ / 1e6], y=[label, label], mode="text",
+                text=[money(lo_), money(hi_)],
+                textposition=["middle left", "middle right"],
+                textfont=dict(size=10, color=MUTED),
+                cliponaxis=False, showlegend=False, hoverinfo="skip"))
         fig.add_trace(go.Scatter(
             x=[mid / 1e6], y=[label], mode="markers+text",
             marker=dict(size=15, color=colour, symbol="diamond"),
             text=[money(mid)], textposition="top center",
             textfont=dict(size=13, color=colour),
             cliponaxis=False,          # let labels spill past the axis, not get cut
-            error_x=dict(type="data", symmetric=False,
-                         array=[(hi_ - mid) / 1e6], arrayminus=[(mid - lo_) / 1e6],
-                         color=colour, thickness=3, width=12),
             showlegend=False,
-            hovertemplate=(f"<b>{label}</b><br>95th pct: {money(mid)}"
-                           f"<br>95% CI: {money(lo_)} – {money(hi_)}<extra></extra>")))
-        if have_ci:  # label the whisker ends, placed OUTWARD so they clear the bar
-            fig.add_trace(go.Scatter(
-                x=[lo_ / 1e6, hi_ / 1e6], y=[label, label], mode="text",
-                text=[money(lo_), money(hi_)],
-                textposition=["middle left", "middle right"],
-                textfont=dict(size=10, color=MUTED),
-                cliponaxis=False,
-                showlegend=False, hoverinfo="skip"))
+            hovertemplate=(f"<b>{label}</b><br>95th pct: {money(mid)}<extra></extra>")))
     fig.add_vline(x=budget / 1e6, line_dash="dot", line_color=MUTED,
                   annotation_text="Budget at today's price")
-    # Pad the x-range so the outward end labels aren't clipped at the plot edge.
-    span_lo = min(r[2] for r in rows) / 1e6
-    span_hi = max(r[3] for r in rows) / 1e6
+    # Pad the x-range around everything drawn — the diamonds included, since they
+    # can now fall outside the interval.
+    _xs = [v for _, mid, lo_, hi_, _ in rows for v in (mid, lo_, hi_)]
+    span_lo = min(_xs) / 1e6
+    span_hi = max(_xs) / 1e6
     pad = max((span_hi - span_lo) * 0.20, 0.6)
     # Height matches the chart beside it, but the y-range is widened past the default
     # [-0.5, 1.5] so the two rows stay close instead of spreading to fill the space.
@@ -587,9 +611,18 @@ with left:
 
     relief = u_mid - h_mid
     if have_ci:
-        st.caption(f"Whiskers span the 95% volatility CI. The hedge cuts the bad case "
-                   f"by {money_md(relief)} ({relief / u_mid:.0%}) and shortens the "
-                   f"whisker: less exposure, and less doubt about it.")
+        # Diamonds track the volatility slider; whiskers track the data. Say so
+        # when the two disagree, rather than letting a detached diamond look
+        # like a rendering fault.
+        outside = not (vci["lo"] <= vol <= vci["hi"])
+        note = (f" The volatility slider is at {vol:.0%}, outside that interval, "
+                f"so the diamonds sit off their whiskers."
+                if outside else "")
+        st.caption(f"Whiskers span the 95% volatility CI "
+                   f"({vci['lo']:.0%}–{vci['hi']:.0%}), diamonds the current "
+                   f"setting. The hedge cuts the bad case by {money_md(relief)} "
+                   f"({relief / u_mid:.0%}) and shortens the whisker: less "
+                   f"exposure, and less doubt about it.{note}")
     else:
         st.caption(f"The hedge cuts the bad case by {money_md(relief)} "
                    f"({relief / u_mid:.0%}). Not enough history yet to bootstrap "
@@ -710,22 +743,56 @@ with st.expander("Calibration from OCPI data"):
             f"estimate, which is what the whiskers on the bad-case chart are drawn from."
         )
 
-with st.expander("How the simulation works, and its simplifications"):
+with st.expander("About this dashboard and methodology"):
+    # f-string: the simulation count tracks the Simulated futures slider rather
+    # than being hardcoded. Any dollar sign added here must be escaped as \$,
+    # since Streamlit reads a bare $...$ as LaTeX.
     st.markdown(
-        """
-Each simulated future is one path of monthly prices. The index follows a random walk
-in log price at the chosen volatility. The buyer's price gets a shock that is ρ times
-the index's shock plus independent noise, so the two move together only partly.
+        f"""
+**Purpose:** A dashboard for hedging GPU compute costs with the Ornn
+Compute Price Index (OCPI). It answers the question a buyer committing to
+hundreds of GPUs would ask: how much of my budget risk can an OCPI hedge
+remove, and what does that depend on?
 
-The hedge is a strip of monthly swaps locked at today's OCPI: when the index settles
-above the locked price, the hedge pays the buyer the difference; when it settles below,
-the buyer pays. Hedged cost = compute bill − hedge payoff.
+**Data:** Daily settled OCPI values for five GPUs, pulled from Ornn's free
+public API. A GitHub Action pulls the data every weekday and merges it into
+a local history, so the series keeps growing past the free tier's rolling
+three-month window.
 
-Simplifications:
-- The buyer's price starts at the index level (no provider premium or discount).
-- Swaps lock at today's spot, not a published forward curve.
-- Each month settles on a single index value rather than the monthly average.
-- Volatility comes from a short sample during a rising market.
+**Simulation methodology:**
+- The model simulates {n_sims:,} possible futures, each a path of monthly
+  prices over the contract length.
+- The index follows a random walk in log price, with volatility calibrated
+  from the OCPI history and no assumed drift, since three months of a
+  rising market can't support a view on direction.
+- The buyer's price gets a shock that is ρ times the index's shock plus
+  independent noise, so the two move together only partly.
+- The hedge is a strip of monthly swaps locked at today's OCPI. When the
+  index settles above the locked price, the hedge pays the buyer the
+  difference; when it settles below, the buyer pays.
+  Hedged cost = compute bill − hedge payoff.
+- For each simulated future, the model computes the buyer's total cost
+  with and without the hedge, then compares the two distributions.
+
+**Limitations:**
+- **Short history:** The free API provides only three months of data,
+  covering a single rising-price regime.
+- **ρ is an assumption, not a measurement:** A real buyer doesn't pay the
+  index. They pay their own provider in their own region, and that price
+  can drift from a blended global index because of regional supply and
+  demand, provider pricing, contract terms, and hardware configuration.
+  The slider shows how the answer changes across that range.
+- **No forward curve:** Forward marks aren't available on the free tier,
+  so swaps lock at today's spot price rather than a forward curve.
+- **Point settlement:** Each month settles on a single index value. A real
+  contract should settle on the monthly average, which matches continuous
+  consumption and is harder to manipulate, as in energy swaps.
+
+**Next steps:** With access to Ornn's full data, the next steps would be to
+measure ρ from real transaction data for buyers across regions and provider
+types, and to price the hedge off the published forward curve. Settling on
+monthly averages would then bring the model in line with how a real
+contract would work.
         """
     )
 
