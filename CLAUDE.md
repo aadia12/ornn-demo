@@ -23,7 +23,7 @@ sub-indices commercially important — an argument to raise in the interview.
 |---|---|
 | `ocpi_pull.py` | Pulls OCPI daily history from Ornn's free public API into `data/ocpi_history.csv`; merges incrementally, saves raw JSON, runs data-quality checks, prints summary stats |
 | `hedge_sim.py` | Calibrates from the CSV, runs the Monte Carlo hedging simulation, prints results, saves `hedge_results.png` |
-| `app.py` | Streamlit dashboard over the same engine. Top: scenario line + four headline metrics (simulated variance removed with its 95% CI, theoretical ρ², hedge ratio, Monte Carlo sample size). Charts are cost histogram / simulated path fan chart on the first row, **bad-case interval chart** / variance-removed-vs-rho curve on the second. **Backtest on realized OCPI history sits last** (three metrics + cumulative-cost and OCPI-vs-locked charts). Six charts total. Default GPU is **B200** |
+| `app.py` | Streamlit dashboard over the same engine. Its **"Refresh OCPI data from Ornn"** button mirrors `ocpi_pull.py`'s `main()` — same incremental merge, same raw JSON snapshot to `data/raw/`, same `validate()` checks, with warnings surfaced via `st.sidebar.warning`. Keep it that way: it writes to the tracked CSV, so it must not be a shortcut around the audit trail or the data-quality checks. Top: scenario line + four headline metrics (simulated variance removed with its 95% CI, theoretical ρ², hedge ratio, Monte Carlo sample size). Charts are cost histogram / simulated path fan chart on the first row, **bad-case interval chart** / variance-removed-vs-rho curve on the second. **Backtest on realized OCPI history sits last** (three metrics + cumulative-cost and OCPI-vs-locked charts). Six charts total. Default GPU is **B200** |
 | `ocpi_daily.yml` | GitHub Actions workflow (not yet installed) to run the pull every weekday and commit the CSV |
 
 Run commands (Windows PowerShell, Python 3.14):
@@ -128,6 +128,14 @@ versus the locked price, *not* by where prices finished. RTX 5090 rose start-to-
 ($0.57 → $0.66) yet still **lost** 4.7%, because it averaged below the lock. The caption
 logic therefore branches on both `saved` and `ended_above` (four cases), so a rising
 chart never renders next to the words "prices fell".
+
+That caption is the backtest's **only** commentary and sits inside the left column,
+under the Cumulative cost chart. It is built as a direction-aware opener plus one shared
+tail ("The outcome depends entirely on which way prices happened to move, which is why
+the simulation covers {n_sims:,} possible futures"), so the four branches only differ in
+their first sentence. The two loss branches carry "insurance doesn't pay out every time"
+— **keep that clause**, it is the only remaining statement of the fair-in-expectation
+point after the separate full-width captions were merged away.
 
 ### Confidence intervals on the headline metrics (`app.py`)
 
@@ -376,6 +384,14 @@ sub-indices nor the forward curve are reachable without a key.
   the author will be explaining this code line by line in an interview.
 - Scripts are CLI-driven with `argparse` and sensible defaults; everything runs from the
   project root on Windows.
+- **The rolling free-tier window has already started dropping days** (verified
+  2026-09-21): the API returns from 2026-06-21, while the local CSV holds 2026-06-20.
+  That day now exists *only* in the local file. The additive merge is what preserves it,
+  so this is no longer a hypothetical benefit — and it means letting the CSV go stale
+  permanently loses whatever rolls out of the window in the meantime. Checked at the
+  same time: OCPI does not restate settled history (zero existing values revised by a
+  refresh), which matters because the merge uses `keep="last"` and would accept
+  restatements silently.
 - Data writes are **incremental and additive**: merge and de-duplicate on a natural key,
   never overwrite history. Keep raw API responses for audit.
 - Fixed random seed so results are reproducible.

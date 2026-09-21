@@ -8,6 +8,8 @@ Run from the project folder (same place as hedge_sim.py and ocpi_pull.py):
 
 from __future__ import annotations
 
+import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -308,13 +310,38 @@ def cached_backtest(path: str, gpu: str, n_gpus: int) -> dict:
     }
 
 
-def refresh_data() -> str:
-    """Pull the latest OCPI history from Ornn's free API into the local CSV."""
-    from ocpi_pull import OrnnClient, history_to_frame, merge_into_store
+def refresh_data() -> tuple[str, list[str]]:
+    """Pull the latest OCPI history from Ornn's free API into the local CSV.
+
+    Mirrors ocpi_pull.py's main() rather than being a shortcut around it: it
+    keeps a raw JSON snapshot for audit and runs the same data-quality checks,
+    so a bad pull through this button can't land in the CSV unnoticed. Returns
+    the status line plus any warnings for the caller to surface.
+    """
+    from ocpi_pull import (OrnnClient, history_to_frame, merge_into_store,
+                           validate)
+
     client = OrnnClient()
-    frames = [history_to_frame(client.index_history(g), g) for g in client.gpu_types()]
+    frames, raw = [], {}
+    for name in client.gpu_types():
+        rows = client.index_history(name)
+        raw[name] = rows
+        frames.append(history_to_frame(rows, name))
+    try:
+        # Latest settled values in one call — a cross-check on the per-GPU
+        # history. Useful in the audit file, never worth failing the pull for.
+        raw["_daily_index_all"] = client.daily_all()
+    except Exception as exc:  # noqa: BLE001
+        raw["_daily_index_all_error"] = str(exc)
+
+    raw_dir = CSV_PATH.parent / "raw"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    (raw_dir / f"ocpi_raw_{stamp}.json").write_text(json.dumps(raw, indent=2))
+
     store = merge_into_store(pd.concat(frames, ignore_index=True), CSV_PATH)
-    return f"Updated: {len(store)} rows through {store['settle_date'].max()}"
+    return (f"Updated: {len(store)} rows through {store['settle_date'].max()}",
+            validate(store))
 
 
 def money(x: float) -> str:
@@ -346,9 +373,11 @@ if not CSV_PATH.exists():
 if st.sidebar.button("Refresh OCPI data from Ornn"):
     try:
         with st.spinner("Pulling from Ornn's API..."):
-            msg = refresh_data()
+            msg, issues = refresh_data()
         st.cache_data.clear()
         st.sidebar.success(msg)
+        for issue in issues:
+            st.sidebar.warning(f"Data check: {issue}")
     except Exception as exc:  # noqa: BLE001
         st.sidebar.error(f"Refresh failed: {exc}")
 
@@ -414,7 +443,7 @@ with _toggle_col:
     # top of the script picks up on the next run.
     st.toggle("Dark mode", value=True, key="dark_mode")
 with _title_col:
-    st.title("Dashboard for hedging GPU compute costs with the Ornn Compute Pricing Index")
+    st.title("Hedge GPU compute costs with the OCPI")
 st.write(
     f"**Scenario:** buyer needs **{n_gpus:,} {gpu}s for {months} months** "
     f"({gpu_hours / 1e6:.2f}M GPU-hours). At today's OCPI of "
@@ -624,6 +653,23 @@ with left:
     fig.update_layout(yaxis_title="Cumulative cost ($M)", height=340,
                       margin=dict(t=10, b=10), legend=dict(x=0.02, y=0.98))
     st.plotly_chart(fig)
+    # Direction-aware opener: the hedge settles against the AVERAGE index over
+    # the window, so its P&L can disagree with where prices happened to finish.
+    # The loss branches carry the insurance framing — the hedge is fair in
+    # expectation at entry, so losing on one path is not a failure.
+    if saved and ended_above:
+        _opener = "Prices rose, so the hedge paid off."
+    elif not saved and not ended_above:
+        _opener = "Prices fell, so the hedge cost money."
+    elif saved:
+        _opener = ("The index ended below the lock but averaged above it, so the "
+                   "hedge paid off.")
+    else:
+        _opener = ("The index ended above the lock but averaged below it, so the "
+                   "hedge cost money.")
+    st.caption(f"{_opener} The outcome depends entirely on which way prices "
+               f"happened to move, which is why the simulation covers "
+               f"{n_sims:,} possible futures.")
 
 with right:
     st.subheader(f"OCPI vs the locked price: {gpu}")
@@ -637,31 +683,6 @@ with right:
     st.caption("Days above the dashed line are days the hedge paid the buyer; "
                "days below are days the buyer paid the hedge.")
 
-# Direction-aware: the hedge settles against the AVERAGE index over the window,
-# so its P&L can disagree with where prices happened to finish.
-if saved and ended_above:
-    st.caption("Prices rose over this window, so the hedge paid off — the buyer "
-               "locked in a price below what they'd have paid at spot.")
-elif not saved and not ended_above:
-    st.caption("Prices fell over this window, so the hedge cost money — the buyer "
-               "locked in a price above spot. This is the other side of insurance: "
-               "it doesn't pay out every time, and that's not a failure of the hedge.")
-elif saved:
-    st.caption("The index finished below the locked price but averaged above it, so "
-               "the hedge still paid off — what matters is the average index over the "
-               "window, not where prices ended.")
-else:
-    st.caption("The index finished above the locked price but averaged below it, so "
-               "the hedge cost money — what matters is the average index over the "
-               "window, not where prices ended. This is the other side of insurance: "
-               "it doesn't pay out every time, and that's not a failure of the hedge.")
-
-st.caption(f"This is one realized path, not a distribution. The outcome depends "
-           f"entirely on which way prices happened to move, which is why the "
-           f"simulation covers {n_sims:,} possible futures instead.")
-st.caption("The hedge is fair in expectation at entry, so this result is neither "
-           "alpha nor a mistake — it's what predictability costs or pays in one "
-           "particular history.")
 
 # ----------------------------------------------------------------------------
 # Calibration details + method
@@ -669,8 +690,8 @@ st.caption("The hedge is fair in expectation at entry, so this result is neither
 with st.expander("Calibration from OCPI data"):
     a, b, c, d = st.columns(4)
     a.metric("Days of history", cal["n_days"])
-    b.metric("Vol from daily returns", f"{cal['vol_daily_ann']:.0%}")
-    c.metric("Vol from weekly returns", f"{cal['vol_weekly_ann']:.0%}")
+    b.metric("Volatility from daily returns", f"{cal['vol_daily_ann']:.0%}")
+    c.metric("Volatility from weekly returns", f"{cal['vol_weekly_ann']:.0%}")
     d.metric("Variance ratio", f"{cal['variance_ratio']:.2f}")
     st.write(
         "Daily moves partly reverse within a week (variance ratio below 1), so daily "
