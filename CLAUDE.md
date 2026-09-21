@@ -23,7 +23,7 @@ sub-indices commercially important — an argument to raise in the interview.
 |---|---|
 | `ocpi_pull.py` | Pulls OCPI daily history from Ornn's free public API into `data/ocpi_history.csv`; merges incrementally, saves raw JSON, runs data-quality checks, prints summary stats |
 | `hedge_sim.py` | Calibrates from the CSV, runs the Monte Carlo hedging simulation, prints results, saves `hedge_results.png` |
-| `app.py` | Streamlit UI over the same engine: sliders for rho, GPU count, volatility, hedge ratio; cost histograms, effectiveness-vs-rho curve, price history, simulated path fan chart |
+| `app.py` | Streamlit UI over the same engine. Opens with a **backtest on realized OCPI history** (three metrics + cumulative-cost chart), then the simulation: sliders for rho, GPU count, volatility, hedge ratio; cost histograms, effectiveness-vs-rho curve, OCPI-vs-locked-price chart, simulated path fan chart |
 | `ocpi_daily.yml` | GitHub Actions workflow (not yet installed) to run the pull every weekday and commit the CSV |
 
 Run commands (Windows PowerShell, Python 3.14):
@@ -44,6 +44,22 @@ settled history for 5 GPUs (A100 SXM4, B200, H100 SXM, H200, RTX 5090). Anonymou
 are rate limited per IP. Endpoints used: `/api/gpu-types-free`, `/api/gpu/{name}`,
 `/api/gpu/{name}/index-history`, `/api/daily-index/all`. An `ORNN_API_KEY` env var is
 supported and would unlock full history, but is not required.
+
+**Forward curve — gated (probed 2026-09-20).** `GET /api/forward` is a real, registered
+route that returns `401 {"error":"Unauthorized","message":"API key required. Use
+Authorization: Bearer YOUR_API_KEY"}`, and `{"message":"Invalid API key"}` when sent a
+bogus key — so it validates credentials, which a non-existent route would not. Unmatched
+paths return an Express **HTML** 404 instead, and `POST /api/forward` 404s while `GET`
+401s, confirming a genuine single-method route. It is **not in the docs** (the raw docs
+HTML contains zero occurrences of forward/tenor/curve/term/future/swap). Every other name
+tried 404s: `forward-curve`, `forwards`, `forward-marks`, `term-structure`, `tenors`,
+`futures`, `swaps`, `curve`, `marks`, plus per-GPU and `-free` variants. One other route
+shows the same gated signature: `/api/index`. Tenors, fields and whether forwards sit
+above or below spot are **unknown** — the gate returns nothing but the error.
+
+**OTPI** — `/api/otpi` is public with 1 month of history and returns a token price index
+per lab (`indexPerMtok`; e.g. anthropic 1.639, openai 0.470, google 0.591, deepseek 0.046
+on 2026-09-19). A second published Ornn index; not used by the demo.
 
 **Vast.ai public API** — marketplace listings with per-host prices and location. This is the
 planned source for regional buyer prices (see Task 1). Not yet built.
@@ -81,6 +97,33 @@ about $1.70/hr in Oct 2025 to about $2.35/hr by Mar 2026 — a good stress scena
 Baseline numbers (500 H100s, 12 months, rho = 0.8, vol 39.9%): budget $12.48M; 95th
 percentile $18.34M unhedged vs $15.84M hedged; variance cut 64.3%.
 
+### Backtest on realized history (`app.py`, top section)
+
+Lock a swap at the first settled index in the CSV, then buy at the daily index for the
+rest of the window. Unhedged = `sum(N * 24 * daily index)`; hedged = `N * 24 * locked *
+days`. Percentages are quoted **relative to the locked (hedged) cost**. No transaction
+costs, no margin, no discounting.
+
+Realized results, 500 GPUs, 93 days (2026-06-20 to 2026-09-20):
+
+| GPU | locked | unhedged | hedged | hedge P&L |
+|---|---|---|---|---|
+| H100 SXM | $2.34 | $3.01M | $2.61M | **+$0.40M (+15.3%)** |
+| B200 | $4.28 | $6.90M | $4.78M | **+$2.12M (+44.4%)** |
+| H200 | $3.46 | $5.07M | $3.86M | +$1.20M (+31.2%) |
+| A100 SXM4 | $1.05 | $1.15M | $1.17M | **−$0.02M (−1.5%)** |
+| RTX 5090 | $0.57 | $0.61M | $0.64M | **−$0.03M (−4.7%)** |
+
+**The hedge loses on two of five GPUs, and that is the point** — it is insurance, fair in
+expectation at entry, not alpha. Captions must stay conditional on the realized outcome;
+never hard-code "prices rose".
+
+**Subtlety worth preserving:** hedge P&L is set by the **average** index over the window
+versus the locked price, *not* by where prices finished. RTX 5090 rose start-to-end
+($0.57 → $0.66) yet still **lost** 4.7%, because it averaged below the lock. The caption
+logic therefore branches on both `saved` and `ended_above` (four cases), so a rising
+chart never renders next to the words "prices fell".
+
 ## Task list, in priority order
 
 ### 1. Vast.ai scraper (`vast_pull.py`) — start immediately
@@ -104,8 +147,10 @@ Add a `.gitignore` for `__pycache__/`, `*.pyc`, and optionally `data/raw/`.
   it is the Asian-option / energy-swap convention. Needs finer time steps (daily or weekly)
   inside each month.
 - **Buyer premium/discount**: let the buyer's starting price differ from the index level.
-- **Forward curve pricing**: Ornn publishes forward marks by tenor. If they are reachable on
-  the free tier, price the swaps off the forward curve instead of today's spot.
+- **Forward curve pricing**: ~~If forward marks are reachable on the free tier~~ —
+  **probed 2026-09-20: blocked.** `GET /api/forward` exists but is key-gated and
+  undocumented (see "Forward curve" under Data sources). Stays blocked until Ornn
+  grants a key; zero drift and lock-at-spot remain the defensible defaults.
 
 ### 4. Writeup (`README.md`, one page)
 Question, method, findings, limitations, and what would change with access to Ornn's real
@@ -116,6 +161,13 @@ Keep a short file of questions the work raised: Does OCPI publish regional sub-i
 API's `region` field is empty on free GPUs and `"global"` on the daily index)? Why 7-day
 settlement? How do they handle the short-horizon noise visible in daily returns? How is the
 winsorization threshold chosen?
+
+Sharpened by the 2026-09-20 probe: *"`GET /api/forward` is registered but returns 401
+without a key, and it isn't in the docs. Is that the forward marks endpoint? What tenors
+does it publish, and is it reachable on any free or trial tier?"* Pair it with the
+regional question — the free tier exposes global spot only (`region` is `""` on
+`/api/gpu-types-free`, `"global"` on `/api/daily-index/all`), so neither regional
+sub-indices nor the forward curve are reachable without a key.
 
 ## Conventions and standards
 

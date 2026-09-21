@@ -60,6 +60,40 @@ def cached_sweep(start_price, vol, n_gpus, months, drift, buyer_vol, n_sims=4000
     return pd.DataFrame(rows)
 
 
+@st.cache_data
+def cached_backtest(path: str, gpu: str, n_gpus: int) -> dict:
+    """Replay the real OCPI history: lock a swap on day one, then buy at spot.
+
+    The buyer needs the GPUs continuously, so every settled day is bought at
+    that day's index. The hedged cost is the locked price for every one of
+    those days. No transaction costs, no margin, no discounting.
+    """
+    s = (load_history(path)
+         .pipe(lambda d: d[d["gpu"] == gpu])
+         .sort_values("settle_date")
+         .reset_index(drop=True))
+    hours_per_day = n_gpus * 24
+    locked = float(s["index_value"].iloc[0])
+    daily_unhedged = hours_per_day * s["index_value"]
+    unhedged = float(daily_unhedged.sum())
+    hedged = float(hours_per_day * locked * len(s))
+    return {
+        "dates": s["settle_date"],
+        "index": s["index_value"],
+        "cum_unhedged": daily_unhedged.cumsum(),
+        "cum_hedged": pd.Series(hours_per_day * locked, index=s.index).cumsum(),
+        "locked": locked,
+        "final": float(s["index_value"].iloc[-1]),
+        "unhedged": unhedged,
+        "hedged": hedged,
+        "diff": unhedged - hedged,          # positive = the hedge saved money
+        "pct": (unhedged - hedged) / hedged,
+        "n_days": len(s),
+        "first": s["settle_date"].iloc[0],
+        "last": s["settle_date"].iloc[-1],
+    }
+
+
 def refresh_data() -> str:
     """Pull the latest OCPI history from Ornn's free API into the local CSV."""
     from ocpi_pull import OrnnClient, history_to_frame, merge_into_store
@@ -104,8 +138,8 @@ months = st.sidebar.slider("Contract length (months)", 3, 24, 12)
 
 st.sidebar.subheader("Basis risk")
 rho = st.sidebar.slider("Correlation of buyer's price with OCPI (ρ)", 0.0, 1.0, 0.80, 0.05,
-                        help="1.0 = the buyer pays exactly the index. Lower = their "
-                             "regional/provider price drifts away from OCPI.")
+                        help="1.0 = the buyer pays exactly the index. Lower = the price "
+                             "they actually pay drifts away from OCPI.")
 
 st.sidebar.subheader("Hedge")
 hedge_mode = st.sidebar.radio("Hedge ratio", ["Optimal (h* = ρ·σ_buyer/σ_index)", "Custom"])
@@ -138,9 +172,72 @@ gpu_hours = n_gpus * HOURS_PER_MONTH * months
 budget = gpu_hours * cal["start_price"]
 
 # ----------------------------------------------------------------------------
-# Header + headline numbers
+# Backtest on realized OCPI history — shown first: what actually happened
 # ----------------------------------------------------------------------------
 st.title("Hedging GPU compute costs with the Ornn Compute Price Index")
+
+bt = cached_backtest(str(CSV_PATH), gpu, n_gpus)
+saved = bt["diff"] > 0              # average index settled above the locked price
+ended_above = bt["final"] >= bt["locked"]
+
+st.header("What actually happened", divider="gray")
+st.write(
+    f"Replaying the real OCPI history. A buyer needing **{n_gpus:,} {gpu}s** "
+    f"continuously locks a swap at the first settled index of the window — "
+    f"**${bt['locked']:.2f}/hr** on {bt['first']:%b %d, %Y} — then buys at the daily "
+    f"index through {bt['last']:%b %d, %Y}, {bt['n_days']} days in all."
+)
+
+b1, b2, b3 = st.columns(3)
+b1.metric("Cost without hedge", money(bt["unhedged"]))
+b2.metric("Cost with hedge", money(bt["hedged"]),
+          f"{(bt['hedged'] - bt['unhedged']) / 1e6:+,.2f}M vs unhedged",
+          delta_color="inverse")          # cheaper is better, so invert the colour
+b3.metric("Hedge saved" if saved else "Hedge cost",
+          money(abs(bt["diff"])),
+          f"{bt['pct']:+.1%} vs locked cost",
+          delta_color="normal")           # signed delta: green saved, red cost
+
+fig = go.Figure()
+fig.add_trace(go.Scatter(x=bt["dates"], y=bt["cum_unhedged"] / 1e6, mode="lines",
+                         line_color=BLUE, name="Unhedged (buy at the daily index)"))
+fig.add_trace(go.Scatter(x=bt["dates"], y=bt["cum_hedged"] / 1e6, mode="lines",
+                         line=dict(color=ORANGE, dash="dash"),
+                         name=f"Hedged (locked at ${bt['locked']:.2f}/hr)"))
+fig.update_layout(yaxis_title="Cumulative cost ($M)", height=360,
+                  margin=dict(t=10, b=10), legend=dict(x=0.02, y=0.98))
+st.plotly_chart(fig)
+
+# Direction-aware: the hedge settles against the AVERAGE index over the window,
+# so its P&L can disagree with where prices happened to finish.
+if saved and ended_above:
+    st.caption("Prices rose over this window, so the hedge paid off — the buyer "
+               "locked in a price below what they'd have paid at spot.")
+elif not saved and not ended_above:
+    st.caption("Prices fell over this window, so the hedge cost money — the buyer "
+               "locked in a price above spot. This is the other side of insurance: "
+               "it doesn't pay out every time, and that's not a failure of the hedge.")
+elif saved:
+    st.caption("The index finished below the locked price but averaged above it, so "
+               "the hedge still paid off — what matters is the average index over the "
+               "window, not where prices ended.")
+else:
+    st.caption("The index finished above the locked price but averaged below it, so "
+               "the hedge cost money — what matters is the average index over the "
+               "window, not where prices ended. This is the other side of insurance: "
+               "it doesn't pay out every time, and that's not a failure of the hedge.")
+
+st.caption(f"This is one realized path, not a distribution. The outcome depends "
+           f"entirely on which way prices happened to move, which is why the "
+           f"simulation below covers {n_sims:,} possible futures instead.")
+st.caption("The hedge is fair in expectation at entry, so this result is neither "
+           "alpha nor a mistake — it's what predictability costs or pays in one "
+           "particular history.")
+
+# ----------------------------------------------------------------------------
+# Simulation: headline numbers
+# ----------------------------------------------------------------------------
+st.header("Simulated futures", divider="gray")
 st.write(
     f"A buyer needs **{n_gpus:,} {gpu}s for {months} months** "
     f"({gpu_hours / 1e6:.2f}M GPU-hours). At today's OCPI of "
@@ -190,7 +287,7 @@ with left:
 # Chart 2: effectiveness vs correlation
 # ----------------------------------------------------------------------------
 with right:
-    st.subheader("Why regional correlation matters")
+    st.subheader("Why basis risk governs the hedge")
     sweep = cached_sweep(cal["start_price"], vol, n_gpus, months, drift, buyer_vol)
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=sweep["rho"], y=sweep["optimal"] * 100, mode="lines+markers",
@@ -213,12 +310,16 @@ with right:
 left, right = st.columns(2)
 
 with left:
-    st.subheader(f"OCPI history: {gpu}")
-    s = history[history["gpu"] == gpu].sort_values("settle_date")
-    fig = go.Figure(go.Scatter(x=s["settle_date"], y=s["index_value"],
+    st.subheader(f"OCPI vs the locked price: {gpu}")
+    fig = go.Figure(go.Scatter(x=bt["dates"], y=bt["index"],
                                mode="lines", line_color=BLUE, name=gpu))
+    fig.add_hline(y=bt["locked"], line_dash="dash", line_color=GRAY,
+                  annotation_text=f"Locked at ${bt['locked']:.2f}/hr",
+                  annotation_position="bottom right")
     fig.update_layout(yaxis_title="$ per GPU-hour", height=340, margin=dict(t=10, b=10))
     st.plotly_chart(fig)
+    st.caption("Days above the dashed line are days the hedge paid the buyer; "
+               "days below are days the buyer paid the hedge.")
 
 with right:
     st.subheader("Simulated index paths")
