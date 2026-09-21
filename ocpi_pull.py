@@ -255,7 +255,7 @@ def main() -> None:
         print(stats.round(4).to_string())
         print("\n=== Correlation of daily log returns ===")
         print(corr.round(3).to_string())
-        print(f"\nNote: {len(wide)} days is a short sample; treat vol and "
+        print(f"\nNote: {store['settle_date'].nunique()} days is a short sample; treat vol and "
               "half-life estimates as rough starting points.")
 
 
