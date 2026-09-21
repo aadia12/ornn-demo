@@ -13,36 +13,144 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+import plotly.io as pio
 import streamlit as st
+from streamlit import config
 
 from hedge_sim import (DAYS_PER_YEAR, HOURS_PER_MONTH, calibrate,
                        optimal_hedge_ratio, simulate)
 
 CSV_PATH = Path("data/ocpi_history.csv")
-BLUE, ORANGE, GRAY = "#2E6FBA", "#E8833A", "#8A8F98"
 
 st.set_page_config(page_title="OCPI Hedging Simulator", page_icon="📉", layout="wide")
+
+
+def palette(mode: str) -> dict:
+    """Every colour the app uses, for one theme, from ornn.com's tokens.
+
+    Bronze is constant across both modes — it's the brand accent. The neutrals
+    have to flip, because a light grey that reads on #141414 disappears on
+    #F3F3F3.
+    """
+    if mode == "light":
+        # neutral is #3D4045, not the obvious #6F7681: that grey has almost the
+        # same luminance as the bronze (contrast 1.03), so the two chart series
+        # would be near-indistinguishable. #3D4045 gives 2.33 against the accent
+        # and 9.38 against the page.
+        return dict(accent="#9A6F35", accent_rgb="154,111,53", neutral="#3D4045",
+                    muted="#6F7681", grid="#DCDCDC", border="#C2C2C2",
+                    ink="#141414", surface="#E8E8E8", page="#F3F3F3")
+    return dict(accent="#AD8147", accent_rgb="173,129,71", neutral="#B2B8C0",
+                muted="#6F7681", grid="#2B2B2B", border="#3D4045",
+                ink="#F3F3F3", surface="#212121", page="#141414")
+
+
+# --- theme toggle ----------------------------------------------------------
+# config.toml holds one [theme] table so the app always opens dark. Flipping the
+# toggle rewrites those options and reruns: the theme is serialised into the
+# NewSession message at the START of a run, so a change only lands on the next
+# one. _theme_applied is seeded to "dark" so the first load doesn't rerun.
+# Note this mutates process-global config — fine for a local demo, but in a
+# multi-user deployment one viewer's toggle would move everyone's theme.
+st.session_state.setdefault("_theme_applied", "dark")
+THEME = "dark" if st.session_state.get("dark_mode", True) else "light"
+
+if st.session_state["_theme_applied"] != THEME:
+    _p = palette(THEME)
+    for _key, _value in {
+        "base": THEME,
+        "primaryColor": _p["accent"],
+        "backgroundColor": _p["page"],
+        "secondaryBackgroundColor": _p["surface"],
+        "textColor": _p["ink"],
+        "borderColor": _p["border"],
+    }.items():
+        config.set_option(f"theme.{_key}", _value)
+    st.session_state["_theme_applied"] = THEME
+    st.rerun()
+
+P = palette(THEME)
+# ACCENT carries the hedge — the thing the demo is arguing for — while NEUTRAL
+# carries the unhedged baseline, so bronze always marks the signal.
+ACCENT, ACCENT_RGB = P["accent"], P["accent_rgb"]
+NEUTRAL, MUTED = P["neutral"], P["muted"]
+GRID, BORDER, INK, SURFACE = P["grid"], P["border"], P["ink"], P["surface"]
+
+# Plotly defaults to a white canvas, which would sit as a bright slab on a black
+# page. Registering a template once restyles every chart without touching each one.
+pio.templates["ornn"] = go.layout.Template(layout=dict(
+    paper_bgcolor="rgba(0,0,0,0)",
+    plot_bgcolor="rgba(0,0,0,0)",
+    font=dict(color=INK, size=12),
+    colorway=[ACCENT, NEUTRAL, MUTED],
+    xaxis=dict(gridcolor=GRID, linecolor=BORDER, zerolinecolor=BORDER,
+               tickcolor=BORDER, title=dict(font=dict(color=MUTED))),
+    yaxis=dict(gridcolor=GRID, linecolor=BORDER, zerolinecolor=BORDER,
+               tickcolor=BORDER, title=dict(font=dict(color=MUTED))),
+    legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(color=INK)),
+    hoverlabel=dict(bgcolor=SURFACE, bordercolor=BORDER, font=dict(color=INK)),
+))
+pio.templates.default = "ornn"
 
 # Streamlit reserves a lot of room above the first element in both columns: a ~6rem
 # top padding in the main block, and a separate stSidebarHeader div holding the
 # collapse arrow. Trim both so the page opens on content rather than empty space.
 # Test IDs verified present in the installed Streamlit build before being used here.
 st.markdown(
-    """
+    f"""
     <style>
-      [data-testid="stMainBlockContainer"], .block-container {
+      [data-testid="stMainBlockContainer"], .block-container {{
           padding-top: 2.2rem; padding-bottom: 2rem;
-      }
+      }}
       /* The sidebar's own header reserves space for the collapse arrow; keep just
          enough for the button itself. */
-      [data-testid="stSidebarHeader"] {
+      [data-testid="stSidebarHeader"] {{
           padding-top: 0.5rem; padding-bottom: 0rem; min-height: 2.25rem; height: auto;
-      }
-      [data-testid="stSidebarUserContent"] { padding-top: 0.25rem; }
+      }}
+      [data-testid="stSidebarUserContent"] {{ padding-top: 0.25rem; }}
       /* st.sidebar.header renders an h2 that carries its own top padding; zero it
          for the first one only. Subheaders are h3 and keep their spacing. */
-      [data-testid="stSidebarUserContent"] h2 { padding-top: 0; margin-top: 0; }
-      [data-testid="stHeader"] { background: transparent; }
+      [data-testid="stSidebarUserContent"] h2 {{ padding-top: 0; margin-top: 0; }}
+      [data-testid="stHeader"] {{ background: transparent; }}
+
+      /* --- ornn.com styling: square corners, bronze controls ---------------
+         theme.baseRadius = "none" squares most chrome; these catch the pieces
+         that carry their own radius (BaseWeb widgets, charts, alerts). */
+      [data-testid="stSlider"] [role="slider"],
+      [data-baseweb="select"] > div, [data-baseweb="popover"] div,
+      [data-testid="stExpander"], [data-testid="stMetric"],
+      [data-testid="stNotification"], [data-testid="stAlert"],
+      .stPlotlyChart, button, input, textarea {{
+          border-radius: 0 !important;
+      }}
+      /* Slider value labels in bronze, matching the track that theme.primaryColor
+         already colours. */
+      [data-testid="stSlider"] [data-testid="stThumbValue"] {{ color: {ACCENT}; }}
+      /* Sidebar reads as a distinct panel against the page. */
+      [data-testid="stSidebar"] {{ border-right: 1px solid {BORDER}; }}
+
+      /* The GPU picker drives every number on the page, so outline the control
+         itself — the box you click to open the dropdown.
+         Drawn as an INSET BOX-SHADOW on the BaseWeb root rather than a border
+         on one of its children. Earlier attempts styled `> div`, which only
+         paints its border on focus, so the outline appeared only while the
+         dropdown was open — what looked like a working border was actually
+         Streamlit's focus ring, bronze because primaryColor is bronze. A
+         box-shadow paints unconditionally and needs no guess about which child
+         owns the border. */
+      .st-key-gpu_box div[data-baseweb="select"] {{
+          box-shadow: inset 0 0 0 1px {ACCENT} !important;
+          background: {SURFACE} !important;
+      }}
+      .st-key-gpu_box label {{ color: {ACCENT} !important; font-weight: 600; }}
+
+      /* st.metric renders a trend arrow next to any delta. Here the delta is a
+         description ("95% CI: 60-64%"), not a movement, so the arrow is noise —
+         but hiding it leaves the text flush against the left edge, hence the
+         padding that stands in for the space the icon used to occupy. */
+      [data-testid="stMetricDeltaIcon-Up"],
+      [data-testid="stMetricDeltaIcon-Down"] {{ display: none !important; }}
+      [data-testid="stMetricDelta"] {{ padding-left: 0.4rem !important; }}
     </style>
     """,
     unsafe_allow_html=True,
@@ -249,7 +357,11 @@ if not CSV_PATH.exists():
 
 history = load_history(str(CSV_PATH))
 gpus = sorted(history["gpu"].unique())
-gpu = st.sidebar.selectbox("GPU", gpus, index=gpus.index("B200") if "B200" in gpus else 0)
+# Wrapped in a keyed container: .st-key-* on a container is a selector hook that
+# definitely lands, which a key on the widget itself did not reliably give us.
+gpu_box = st.sidebar.container(key="gpu_box")
+gpu = gpu_box.selectbox("GPU", gpus,
+                        index=gpus.index("B200") if "B200" in gpus else 0)
 cal = cached_calibration(str(CSV_PATH), gpu)
 
 n_gpus = st.sidebar.slider("Number of GPUs", 50, 5000, 500, step=50)
@@ -299,7 +411,13 @@ budget = gpu_hours * cal["start_price"]
 # ----------------------------------------------------------------------------
 # Headline numbers
 # ----------------------------------------------------------------------------
-st.title("Dashboard for hedging GPU compute costs with the OCPI")
+_title_col, _toggle_col = st.columns([7, 1], vertical_alignment="center")
+with _toggle_col:
+    # Reads back into st.session_state["dark_mode"], which the theme block at the
+    # top of the script picks up on the next run.
+    st.toggle("Dark mode", value=True, key="dark_mode")
+with _title_col:
+    st.title("Dashboard for hedging GPU compute costs with the Ornn Compute Pricing Index")
 st.write(
     f"**Scenario:** buyer needs **{n_gpus:,} {gpu}s for {months} months** "
     f"({gpu_hours / 1e6:.2f}M GPU-hours). At today's OCPI of "
@@ -351,10 +469,10 @@ with left:
     bins = dict(start=lo, end=hi, size=(hi - lo) / 70)
     fig = go.Figure()
     fig.add_trace(go.Histogram(x=u / 1e6, xbins=bins, name="Unhedged",
-                               marker_color=BLUE, opacity=0.55))
+                               marker_color=NEUTRAL, opacity=0.55))
     fig.add_trace(go.Histogram(x=h / 1e6, xbins=bins, name="Hedged with OCPI",
-                               marker_color=ORANGE, opacity=0.6))
-    fig.add_vline(x=budget / 1e6, line_dash="dot", line_color=GRAY,
+                               marker_color=ACCENT, opacity=0.6))
+    fig.add_vline(x=budget / 1e6, line_dash="dot", line_color=MUTED,
                   annotation_text="Budget at today's price")
     fig.update_layout(barmode="overlay", xaxis_title="Total cost ($M)",
                       yaxis_title="Number of simulated futures", height=400,
@@ -376,13 +494,13 @@ with right:
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=x, y=p95, line=dict(width=0), showlegend=False, hoverinfo="skip"))
     fig.add_trace(go.Scatter(x=x, y=p5, fill="tonexty", line=dict(width=0),
-                             fillcolor="rgba(46,111,186,0.15)", name="5th–95th pct"))
+                             fillcolor=f"rgba({ACCENT_RGB},0.15)", name="5th–95th pct"))
     fig.add_trace(go.Scatter(x=x, y=p75, line=dict(width=0), showlegend=False, hoverinfo="skip"))
     fig.add_trace(go.Scatter(x=x, y=p25, fill="tonexty", line=dict(width=0),
-                             fillcolor="rgba(46,111,186,0.30)", name="25th–75th pct"))
-    fig.add_trace(go.Scatter(x=x, y=p50, line_color=BLUE, name="Median"))
+                             fillcolor=f"rgba({ACCENT_RGB},0.30)", name="25th–75th pct"))
+    fig.add_trace(go.Scatter(x=x, y=p50, line_color=ACCENT, name="Median"))
     for i in range(5):  # a few individual futures, for intuition
-        fig.add_trace(go.Scatter(x=x, y=paths[i], line=dict(color=GRAY, width=1),
+        fig.add_trace(go.Scatter(x=x, y=paths[i], line=dict(color=MUTED, width=1),
                                  opacity=0.6, showlegend=(i == 0), name="Sample paths"))
     fig.update_layout(xaxis_title="Months from today", yaxis_title="$ per GPU-hour",
                       height=400, margin=dict(t=10, b=10))
@@ -401,8 +519,8 @@ with left:
     fig = go.Figure()
     # One marker per case at the 95th percentile, with a whisker spanning the range
     # the volatility CI implies. Asymmetric error bars: the interval is not centred.
-    rows = [("Unhedged", u_mid, u_lo if have_ci else u_mid, u_hi if have_ci else u_mid, BLUE),
-            ("Hedged", h_mid, h_lo if have_ci else h_mid, h_hi if have_ci else h_mid, ORANGE)]
+    rows = [("Unhedged", u_mid, u_lo if have_ci else u_mid, u_hi if have_ci else u_mid, NEUTRAL),
+            ("Hedged", h_mid, h_lo if have_ci else h_mid, h_hi if have_ci else h_mid, ACCENT)]
     for label, mid, lo_, hi_, colour in rows:
         fig.add_trace(go.Scatter(
             x=[mid / 1e6], y=[label], mode="markers+text",
@@ -421,10 +539,10 @@ with left:
                 x=[lo_ / 1e6, hi_ / 1e6], y=[label, label], mode="text",
                 text=[money(lo_), money(hi_)],
                 textposition=["middle left", "middle right"],
-                textfont=dict(size=10, color=GRAY),
+                textfont=dict(size=10, color=MUTED),
                 cliponaxis=False,
                 showlegend=False, hoverinfo="skip"))
-    fig.add_vline(x=budget / 1e6, line_dash="dot", line_color=GRAY,
+    fig.add_vline(x=budget / 1e6, line_dash="dot", line_color=MUTED,
                   annotation_text="Budget at today's price")
     # Pad the x-range so the outward end labels aren't clipped at the plot edge.
     span_lo = min(r[2] for r in rows) / 1e6
@@ -459,11 +577,11 @@ with right:
     sweep = cached_sweep(cal["start_price"], vol, n_gpus, months, drift, buyer_vol)
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=sweep["rho"], y=sweep["optimal"] * 100, mode="lines+markers",
-                             name="Optimal hedge ratio", line_color=BLUE))
+                             name="Optimal hedge ratio", line_color=ACCENT))
     fig.add_trace(go.Scatter(x=sweep["rho"], y=sweep["full"] * 100, mode="lines+markers",
-                             name="Full hedge (ratio = 1)", line=dict(color=ORANGE, dash="dash")))
-    fig.add_hline(y=0, line_color=GRAY, line_width=1)
-    fig.add_vline(x=rho, line_dash="dot", line_color=GRAY, annotation_text=f"ρ = {rho:.2f}")
+                             name="Full hedge (ratio = 1)", line=dict(color=NEUTRAL, dash="dash")))
+    fig.add_hline(y=0, line_color=MUTED, line_width=1)
+    fig.add_vline(x=rho, line_dash="dot", line_color=MUTED, annotation_text=f"ρ = {rho:.2f}")
     fig.update_layout(xaxis=dict(title="Correlation of buyer's price with OCPI (ρ)",
                                  autorange="reversed"),
                       yaxis_title="Budget variance removed (%)", height=320,
@@ -502,9 +620,9 @@ with left:
     st.subheader("Cumulative cost")
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=bt["dates"], y=bt["cum_unhedged"] / 1e6, mode="lines",
-                             line_color=BLUE, name="Unhedged (buy at the daily index)"))
+                             line_color=NEUTRAL, name="Unhedged (buy at the daily index)"))
     fig.add_trace(go.Scatter(x=bt["dates"], y=bt["cum_hedged"] / 1e6, mode="lines",
-                             line=dict(color=ORANGE, dash="dash"),
+                             line=dict(color=ACCENT, dash="dash"),
                              name=f"Hedged (locked at ${bt['locked']:.2f}/hr)"))
     fig.update_layout(yaxis_title="Cumulative cost ($M)", height=340,
                       margin=dict(t=10, b=10), legend=dict(x=0.02, y=0.98))
@@ -513,8 +631,8 @@ with left:
 with right:
     st.subheader(f"OCPI vs the locked price: {gpu}")
     fig = go.Figure(go.Scatter(x=bt["dates"], y=bt["index"],
-                               mode="lines", line_color=BLUE, name=gpu))
-    fig.add_hline(y=bt["locked"], line_dash="dash", line_color=GRAY,
+                               mode="lines", line_color=ACCENT, name=gpu))
+    fig.add_hline(y=bt["locked"], line_dash="dash", line_color=MUTED,
                   annotation_text=f"Locked at ${bt['locked']:.2f}/hr",
                   annotation_position="bottom right")
     fig.update_layout(yaxis_title="$ per GPU-hour", height=340, margin=dict(t=10, b=10))
