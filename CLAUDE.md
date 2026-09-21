@@ -240,17 +240,32 @@ the two chart series become near-indistinguishable. Light mode uses `#3D4045` in
 page: dark accent 5.27, neutral 9.22, muted 4.02; light accent 4.03, neutral 9.38,
 muted 4.13. Gridlines are decorative and intentionally below 3:1.
 
-The **GPU picker** drives every number on the page, so its control carries a bronze
-outline the other inputs don't have. Two traps here, both hit during development:
+### CSS: verify every selector against the frontend bundle
 
-- **Use a keyed `st.container`, not a key on the widget.** `st.container(key="gpu_box")`
-  reliably emits `.st-key-gpu_box`; the same key on the selectbox itself did not give a
-  selector that matched.
-- **Draw the outline as `box-shadow: inset 0 0 0 1px`, not `border`.** BaseWeb's inner
-  control only paints its border on focus, so a `border` rule made the outline appear
-  *only while the dropdown was open* — and what looked like it half-working was actually
-  Streamlit's focus ring, which is bronze because `primaryColor` is bronze. A box-shadow
-  paints unconditionally and needs no guess about which child owns the border.
+**`data-baseweb` attributes do not exist in this Streamlit build.** Four rounds of
+selectbox styling silently did nothing because every rule was scoped through
+`[data-baseweb="select"]`, which matches zero elements. The bronze outline that seemed
+to appear on click was Streamlit's own focus ring — bronze because `primaryColor` is.
+`stThumbValue` and `stNotification` were dead for the same reason.
+
+Before writing a selector, grep the bundle:
+
+```
+python -c "import streamlit,pathlib; p=pathlib.Path(streamlit.__file__).parent/'static'; \
+print(sum(f.read_text(errors='ignore').count('stSelectbox') for f in p.rglob('*.js')))"
+```
+
+A zero means the selector will never match, and no amount of `!important` will save it.
+Everything currently in `app.py`'s style block has been checked this way.
+
+The **GPU picker** drives every number on the page, so its control carries a bronze
+border and an `INK` label — `INK` rather than a literal white, so it flips to near-black
+in light mode instead of disappearing. Rules are scoped to
+`[data-testid="stSidebar"] [data-testid="stSelectbox"]`; there is exactly one selectbox,
+so no per-widget key is needed. Bolding the label and the selected value was tried and
+reverted — it read badly. Note that if anything ever does need to style the open
+dropdown list, it renders in a portal *outside* the sidebar and needs an unscoped rule
+on `stSelectboxVirtualDropdown`.
 
 `st.metric` draws a **trend arrow** beside any delta. Every delta on this page is a
 description ("95% CI: 60–64%", "Monte Carlo paths"), not a movement, so

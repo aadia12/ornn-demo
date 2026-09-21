@@ -113,36 +113,36 @@ st.markdown(
       [data-testid="stSidebarUserContent"] h2 {{ padding-top: 0; margin-top: 0; }}
       [data-testid="stHeader"] {{ background: transparent; }}
 
-      /* --- ornn.com styling: square corners, bronze controls ---------------
+      /* --- ornn.com styling: square corners --------------------------------
          theme.baseRadius = "none" squares most chrome; these catch the pieces
-         that carry their own radius (BaseWeb widgets, charts, alerts). */
+         that carry their own radius. Every test ID here was checked against
+         the installed frontend bundle — see the note in CLAUDE.md about
+         data-baseweb, which does NOT exist in this build. */
       [data-testid="stSlider"] [role="slider"],
-      [data-baseweb="select"] > div, [data-baseweb="popover"] div,
+      [data-testid="stSelectbox"] > div,
+      [data-testid="stSelectboxVirtualDropdown"],
       [data-testid="stExpander"], [data-testid="stMetric"],
-      [data-testid="stNotification"], [data-testid="stAlert"],
+      [data-testid="stAlert"],
       .stPlotlyChart, button, input, textarea {{
           border-radius: 0 !important;
       }}
-      /* Slider value labels in bronze, matching the track that theme.primaryColor
-         already colours. */
-      [data-testid="stSlider"] [data-testid="stThumbValue"] {{ color: {ACCENT}; }}
       /* Sidebar reads as a distinct panel against the page. */
       [data-testid="stSidebar"] {{ border-right: 1px solid {BORDER}; }}
 
-      /* The GPU picker drives every number on the page, so outline the control
-         itself — the box you click to open the dropdown.
-         Drawn as an INSET BOX-SHADOW on the BaseWeb root rather than a border
-         on one of its children. Earlier attempts styled `> div`, which only
-         paints its border on focus, so the outline appeared only while the
-         dropdown was open — what looked like a working border was actually
-         Streamlit's focus ring, bronze because primaryColor is bronze. A
-         box-shadow paints unconditionally and needs no guess about which child
-         owns the border. */
-      .st-key-gpu_box div[data-baseweb="select"] {{
-          box-shadow: inset 0 0 0 1px {ACCENT} !important;
-          background: {SURFACE} !important;
+      /* --- GPU picker -------------------------------------------------------
+         It drives every number on the page, so the control gets a bronze border.
+         Scoped to the sidebar's selectbox because there is exactly one; add a
+         scope here if another is ever introduced. Inside stSelectbox the label
+         is a <label>, so `> div` is the control wrapper — the box you click to
+         open the dropdown. Bolding the label and value was tried and reverted;
+         it read badly. */
+      [data-testid="stSidebar"] [data-testid="stSelectbox"] > div {{
+          border: 1px solid {ACCENT} !important;
       }}
-      .st-key-gpu_box label {{ color: {ACCENT} !important; font-weight: 600; }}
+      [data-testid="stSidebar"] [data-testid="stSelectbox"] label,
+      [data-testid="stSidebar"] [data-testid="stSelectbox"] label p {{
+          color: {INK} !important;
+      }}
 
       /* st.metric renders a trend arrow next to any delta. Here the delta is a
          description ("95% CI: 60-64%"), not a movement, so the arrow is noise —
@@ -357,11 +357,8 @@ if not CSV_PATH.exists():
 
 history = load_history(str(CSV_PATH))
 gpus = sorted(history["gpu"].unique())
-# Wrapped in a keyed container: .st-key-* on a container is a selector hook that
-# definitely lands, which a key on the widget itself did not reliably give us.
-gpu_box = st.sidebar.container(key="gpu_box")
-gpu = gpu_box.selectbox("GPU", gpus,
-                        index=gpus.index("B200") if "B200" in gpus else 0)
+gpu = st.sidebar.selectbox("GPU", gpus,
+                           index=gpus.index("B200") if "B200" in gpus else 0)
 cal = cached_calibration(str(CSV_PATH), gpu)
 
 n_gpus = st.sidebar.slider("Number of GPUs", 50, 5000, 500, step=50)
@@ -464,7 +461,7 @@ if hedge_mode == "Custom" and var_cut < 0:
 left, right = st.columns(2)
 
 with left:
-    st.subheader("Cost across Monte Carlo simulated futures")
+    st.subheader("Total cost across simulated futures")
     lo, hi = np.percentile(np.concatenate([u, h]), [0.2, 99.8]) / 1e6
     bins = dict(start=lo, end=hi, size=(hi - lo) / 70)
     fig = go.Figure()
@@ -485,7 +482,7 @@ with left:
 # Chart 2: simulated price paths
 # ----------------------------------------------------------------------------
 with right:
-    st.subheader("Simulated index paths")
+    st.subheader("Monte Carlo simulated index paths")
     idx = res["index"]
     x = np.arange(0, months + 1)
     start_col = np.full((idx.shape[0], 1), cal["start_price"])
