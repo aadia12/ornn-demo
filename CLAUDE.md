@@ -23,7 +23,7 @@ sub-indices commercially important — an argument to raise in the interview.
 |---|---|
 | `ocpi_pull.py` | Pulls OCPI daily history from Ornn's free public API into `data/ocpi_history.csv`; merges incrementally, saves raw JSON, runs data-quality checks, prints summary stats |
 | `hedge_sim.py` | Calibrates from the CSV, runs the Monte Carlo hedging simulation, prints results, saves `hedge_results.png` |
-| `app.py` | Streamlit UI over the same engine. Opens with a **backtest on realized OCPI history** (three metrics + cumulative-cost chart), then the simulation: sliders for rho, GPU count, volatility, hedge ratio; cost histograms, effectiveness-vs-rho curve, OCPI-vs-locked-price chart, simulated path fan chart |
+| `app.py` | Streamlit dashboard over the same engine. Top: scenario line + four headline metrics (simulated variance removed with its 95% CI, theoretical ρ², hedge ratio, Monte Carlo sample size). Charts are cost histogram / simulated path fan chart on the first row, **bad-case interval chart** / variance-removed-vs-rho curve on the second. **Backtest on realized OCPI history sits last** (three metrics + cumulative-cost and OCPI-vs-locked charts). Six charts total. Default GPU is **B200** |
 | `ocpi_daily.yml` | GitHub Actions workflow (not yet installed) to run the pull every weekday and commit the CSV |
 
 Run commands (Windows PowerShell, Python 3.14):
@@ -97,22 +97,27 @@ about $1.70/hr in Oct 2025 to about $2.35/hr by Mar 2026 — a good stress scena
 Baseline numbers (500 H100s, 12 months, rho = 0.8, vol 39.9%): budget $12.48M; 95th
 percentile $18.34M unhedged vs $15.84M hedged; variance cut 64.3%.
 
-### Backtest on realized history (`app.py`, top section)
+### Backtest on realized history (`app.py`, bottom section)
 
 Lock a swap at the first settled index in the CSV, then buy at the daily index for the
 rest of the window. Unhedged = `sum(N * 24 * daily index)`; hedged = `N * 24 * locked *
-days`. Percentages are quoted **relative to the locked (hedged) cost**. No transaction
-costs, no margin, no discounting.
+days`. No transaction costs, no margin, no discounting.
+
+The "Hedge saved" metric is quoted as a **share of the unhedged bill**
+(`pct_unhedged = diff / unhedged`), which reads as "the hedge saved X% of what you'd
+otherwise have paid". The dollar amount is not repeated there — it is already the delta
+under "Cost with hedge". `bt["pct"]` (vs the locked cost) is still computed and is what
+the earlier 15.3% / 44.4% figures referred to; don't mix the two denominators.
 
 Realized results, 500 GPUs, 93 days (2026-06-20 to 2026-09-20):
 
-| GPU | locked | unhedged | hedged | hedge P&L |
-|---|---|---|---|---|
-| H100 SXM | $2.34 | $3.01M | $2.61M | **+$0.40M (+15.3%)** |
-| B200 | $4.28 | $6.90M | $4.78M | **+$2.12M (+44.4%)** |
-| H200 | $3.46 | $5.07M | $3.86M | +$1.20M (+31.2%) |
-| A100 SXM4 | $1.05 | $1.15M | $1.17M | **−$0.02M (−1.5%)** |
-| RTX 5090 | $0.57 | $0.61M | $0.64M | **−$0.03M (−4.7%)** |
+| GPU | locked | unhedged | hedged | hedge P&L | % of unhedged (shown in UI) |
+|---|---|---|---|---|---|
+| H100 SXM | $2.34 | $3.01M | $2.61M | +$0.40M | **+13.3%** |
+| B200 | $4.28 | $6.90M | $4.78M | +$2.12M | **+30.7%** |
+| H200 | $3.46 | $5.07M | $3.86M | +$1.20M | +23.8% |
+| A100 SXM4 | $1.05 | $1.15M | $1.17M | −$0.02M | **−1.5%** |
+| RTX 5090 | $0.57 | $0.61M | $0.64M | −$0.03M | **−4.9%** |
 
 **The hedge loses on two of five GPUs, and that is the point** — it is insurance, fair in
 expectation at entry, not alpha. Captions must stay conditional on the realized outcome;
@@ -123,6 +128,106 @@ versus the locked price, *not* by where prices finished. RTX 5090 rose start-to-
 ($0.57 → $0.66) yet still **lost** 4.7%, because it averaged below the lock. The caption
 logic therefore branches on both `saved` and `ended_above` (four cases), so a rising
 chart never renders next to the words "prices fell".
+
+### Confidence intervals on the headline metrics (`app.py`)
+
+The p95 and variance-reduction numbers rest on a volatility estimated from ~3 months of
+data, so the app states how uncertain that estimate is — as captions under the existing
+metrics, no extra charts.
+
+- **Stationary block bootstrap** (Politis & Romano) of the daily log returns, geometric
+  block lengths with expected length **7 days**, circular wrap, 2,000 resamples, seed 42.
+- **Blocks, not iid resampling.** The variance ratio of ~0.36 says daily returns are not
+  independent; resampling single days would erase the reversal, rebuild something that
+  really is a random walk, and make the vol estimate look more precise than it is.
+- Each resample is rebuilt into a log-price path and vol is re-estimated **exactly as
+  `calibrate()` does** — overlapping 7-day returns, `std(ddof=1) * sqrt(365/7)`.
+- CI = 2.5th/97.5th percentiles of the resampled vols.
+- The **full simulation runs at only three vols** (CI low, point, CI high) via
+  `cached_ci_sims`. Never run the simulation inside the bootstrap loop: 2,000 x 10,000
+  paths would hang the app.
+- **Cache keys:** `cached_vol_ci` is keyed on **GPU only** — it depends on that GPU's
+  price history and nothing else. `cached_ci_sims` is keyed on the full parameter set,
+  like `cached_sim`, since the cost range depends on all of it.
+
+H100 SXM, 500 GPUs, rho 0.8: vol point estimate **39.9%**, 95% CI **32.9%–65.6%**
+(93 days); variance removed holds at **63–65%** across that whole range — the headline
+finding is robust to the volatility estimate. Measured cost: bootstrap ~20ms, cold
+full-page run 1.9s, warm rerun 0.3s, so no deferred-fill fallback was needed.
+
+The **bad-case interval chart** (bottom right, beside the fan chart) is where the
+95th-percentile costs live. Two rows, unhedged and hedged: a diamond at the p95 and an
+asymmetric whisker spanning what that p95 becomes across the volatility CI, with a
+dotted reference line at the budget. It makes the hedge's two effects visible at once —
+the diamond moves left (less exposure) and the whisker shortens (less uncertainty about
+the exposure). Everything is computed from the selected GPU; nothing hardcoded.
+
+Data labels: the p95 sits above each diamond in the series colour (`top center`); the CI
+bounds sit at the whisker ends in small grey, positioned **outward** (`middle left` /
+`middle right`) so they clear the bar — placing them inward puts the text straight on
+top of the whisker. The x-range is padded by 20% of the span (floor 0.6M) and widened to
+include the budget line so those outward labels aren't clipped; that leaves 11–16% of
+the visible width free on the right across all five GPUs. Recheck the padding if label
+text or font sizes change.
+
+Sizing: this chart and the variance-removed curve beside it are both **320px** so the
+row lines up. Because plotly spaces categories as a fraction of plot height, matching
+heights would normally push the two bars apart, so the y-range is widened past the
+default `[-0.5, 1.5]` to **`[-0.95, 1.95]`**. That yields a 74px gap between the rows
+(down from 145px) with 70px of clear space above and below — balanced, and enough
+headroom that the top data label isn't clipped. Every trace also sets
+**`cliponaxis=False`**, which is the actual fix for labels being cut off at the plot
+edge; the range widening alone would not guarantee it.
+
+Layout note: `.block-container` top padding is overridden to 2.2rem (1.2rem in the
+sidebar) via injected CSS right after `set_page_config`, because Streamlit's default
+~6rem gap made the page open on empty space.
+
+`cached_ci_sims` runs at `(lo, slider_vol, hi)`, so the whisker always brackets the
+p95 the rest of the page shows even if the volatility slider is overridden. Only
+"Budget variance removed" keeps a CI caption up top.
+
+Relief and whisker width by GPU (500 GPUs, rho 0.8, 93 days):
+
+| GPU | bad case cut by | whisker unhedged → hedged | variance removed |
+|---|---|---|---|
+| B200 | $14.77M (22%) | $23.02M → $12.87M | 61% |
+| H100 SXM | $2.33M (14%) | $5.18M → $2.90M | 64% |
+| RTX 5090 | $0.67M (15%) | $1.78M → $1.00M | 64% |
+| A100 SXM4 | $0.55M (10%) | $1.70M → $0.94M | 65% |
+
+**The CI's skew is not always to the right** — worth knowing even though the UI no
+longer states it in words. The natural explanation (volatility is bounded at zero, so
+the sampling distribution skews right) holds for only three of five GPUs. Percentage
+points below/above the point estimate:
+
+| GPU | below | above | skew | variance ratio |
+|---|---|---|---|---|
+| H100 SXM | 7 | 26 | right | 0.35 |
+| A100 SXM4 | 5 | 25 | right | 0.24 |
+| H200 | 19 | 29 | right | 0.64 |
+| RTX 5090 | 25 | 21 | ~symmetric | 0.98 |
+| **B200** | **36** | **12** | **LEFT** | **2.17** |
+
+B200 — the default GPU — leans left: its point estimate is propped up by a sustained
+run in a short sample, and resampled histories that break the run come out calmer. **If
+any copy ever describes the interval's shape again, branch on the measured asymmetry
+rather than assuming right-skew** — same rule as the backtest captions: never assert a
+direction the data hasn't been checked for.
+
+Sidebar order is **Scenario inputs → Model settings → Market assumptions**. Model
+settings is built into an `st.sidebar.container()` reserved up front, because the
+"Share of usage hedged" control belongs at the bottom of that block but needs `rho` and
+the volatilities that are only set further down the page. Create the container early,
+fill it late.
+
+**Reconciliation note:** on the 92-day window this reproduces 31.6%–63.2% (seed 42; 20
+seeds span 31.2–32.3% and 62.5–64.4%), matching the earlier 31.1%–62.4% to within
+bootstrap Monte Carlo error. The CI widened on day 93 because H100 fell 7% in one day
+($2.85 → $2.65). That same move rescaled every p95: budget went $12.48M → $11.61M, and
+p95 unhedged $18.34M → $17.07M — exactly the ratio 2.65/2.85. **Absolute p95 levels
+track the latest spot and will keep moving; the CI width and the 63–65% band are the
+stable results.**
 
 ## Task list, in priority order
 
@@ -178,6 +283,13 @@ sub-indices nor the forward curve are reachable without a key.
 - Data writes are **incremental and additive**: merge and de-duplicate on a natural key,
   never overwrite history. Keep raw API responses for audit.
 - Fixed random seed so results are reproducible.
+- **Escape `$` as `\$` in every Streamlit markdown string** (`st.write`, `st.markdown`,
+  `st.caption`). Streamlit parses a bare `$...$` as LaTeX, so two dollar amounts in one
+  sentence swallow the text between them and render it as math — this is what produced
+  the stray-asterisk and part-green/part-grey rendering bugs. Use the `money_md()` and
+  `price_md()` helpers in `app.py` for markdown, and plain `money()` for `st.metric`
+  values and deltas, which are **not** markdown-rendered and would show the backslash.
+  Plotly titles, legend names and annotations are not markdown either — leave those bare.
 - Every new estimate gets a data-quality check and a stated limitation.
 
 ## Honesty rules for this project (important)
